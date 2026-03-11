@@ -1,0 +1,218 @@
+---
+title: "Manitoba Assessment Parcels — 3D Value Map"
+subtitle: "437,000 parcels visualized with freestiler + mapgl"
+author: "MBOpenData"
+date: today
+format:
+  html:
+    toc: true
+    code-fold: true
+    code-summary: "Show code"
+execute:
+  echo: true
+  warning: true
+  message: true
+---
+
+## Overview
+
+Interactive 3D map of Manitoba's ~437,000 property assessment parcels.
+**Height** encodes total assessed value; **color** encodes municipality.
+
+Pipeline: GeoParquet (from download script) → PMTiles (via freestiler) → 3D map (via mapgl).
+
+## Setup
+
+```{r}
+#| label: setup
+
+library(duckdb)
+library(DBI)
+library(freestiler)
+library(mapgl)
+library(arrow)
+library(geoarrow)
+library(dplyr)
+library(sf)
+library(fs)
+library(glue)
+library(cli)
+library(scales)
+library(readr)
+library(stringr)
+
+layer_name <- "mb-parcels"
+pmtiles_file <- "data/mb-assessment-parcels.pmtiles"
+
+# PMTiles URL for the deployed map (GitHub Releases — supports HTTP range requests)
+pmtiles_url <- "https://github.com/jayschellenberg/MBOpenData/releases/download/v1/mb-assessment-parcels.pmtiles"
+```
+
+## Find Data
+
+```{r}
+#| label: find-data
+
+parquet_files <- fs::dir_ls("data", glob = "*/mb-assessment-parcels-*.parquet")
+
+if (length(parquet_files) == 0) {
+  stop("No GeoParquet files found in data/. Run MBAssessmentParcels.qmd first.")
+}
+
+input_file <- sort(parquet_files, decreasing = TRUE)[1]
+file_date <- stringr::str_extract(basename(input_file), "\\d{4}-\\d{2}-\\d{2}")
+
+cli_alert_success("Using: {basename(input_file)}")
+cli_alert_info("Download date: {file_date}")
+cli_alert_info("File size: {fs::file_size(input_file)}")
+```
+
+## Generate PMTiles
+
+```{r}
+#| label: generate-pmtiles
+
+# Skip if PMTiles is newer than source parquet
+needs_rebuild <- !fs::file_exists(pmtiles_file) ||
+  fs::file_info(pmtiles_file)$modification_time <
+  fs::file_info(input_file)$modification_time
+
+if (needs_rebuild) {
+  cli_alert_info("Generating PMTiles from {basename(input_file)}...")
+
+  # Use freestile() with sf object (not freestile_query) because
+  # DuckDB doesn't recognize geoarrow geometry as spatial type
+  parcels_sf <- read_parquet(input_file) |>
+    mutate(geometry = st_as_sfc(geometry)) |>
+    st_as_sf() |>
+    select(OBJECTID, Roll_No_Txt, Total_Value, Total_Value_Num,
+           Property_Address, Municipality, Muni_Name_With_Typ,
+           Dwelling_Units)
+
+  freestile(
+    input = parcels_sf,
+    output = pmtiles_file,
+    layer_name = layer_name,
+    min_zoom = 5L,
+    max_zoom = 14L
+  )
+
+  cli_alert_success("PMTiles written: {fs::file_size(pmtiles_file)}")
+} else {
+  cli_alert_info("PMTiles up to date: {fs::file_size(pmtiles_file)}")
+}
+```
+
+## Explore Municipalities
+
+```{r}
+#| label: municipality-codes
+
+parcels_df <- read_parquet(input_file) |>
+  as.data.frame() |>
+  count(Muni_Name_With_Typ, sort = TRUE)
+
+cli_alert_info("Found {nrow(parcels_df)} municipalities")
+parcels_df |> head(20) |> knitr::kable()
+```
+
+```{r}
+#| label: define-palette
+
+# Define a categorical color palette for the top municipalities
+# Colors chosen for visual distinction on a dark basemap
+palette <- c(
+  "#e74c3c",   # red
+  "#3498db",   # blue
+  "#2ecc71",   # green
+  "#f39c12",   # orange
+  "#9b59b6",   # purple
+  "#1abc9c",   # teal
+  "#e67e22",   # dark orange
+  "#ec407a",   # pink
+  "#26c6da",   # cyan
+  "#ffca28",   # amber
+  "#8d6e63",   # brown
+  "#78909c"    # blue-grey
+)
+
+# Use top municipalities by parcel count for color coding
+muni_names <- parcels_df$Muni_Name_With_Typ
+muni_colors <- rep_len(palette, length(muni_names))
+```
+
+## 3D Map
+
+```{r}
+#| label: map-3d
+
+maplibre(
+  style = carto_style("dark-matter"),
+  center = c(-98.0, 55.0),
+  zoom = 5,
+  pitch = 30,
+  bearing = 0,
+  projection = "mercator"
+) |>
+  add_pmtiles_source(
+    id = "mb-parcels-source",
+    url = pmtiles_url
+  ) |>
+  add_fill_extrusion_layer(
+    id = "mb-parcels-3d",
+    source = "mb-parcels-source",
+    source_layer = layer_name,
+    fill_extrusion_height = interpolate(
+      column = "Total_Value_Num",
+      values = c(0, 100000, 500000, 2000000, 10000000),
+      stops = c(0, 50, 200, 600, 2000)
+    ),
+    fill_extrusion_color = match_expr(
+      column = "Muni_Name_With_Typ",
+      values = muni_names,
+      stops = muni_colors,
+      default = "#95a5a6"
+    ),
+    fill_extrusion_opacity = 0.8,
+    tooltip = concat(
+      "<strong>", get_column("Property_Address"), "</strong><br>",
+      "Value: ", get_column("Total_Value"), "<br>",
+      "Municipality: ", get_column("Muni_Name_With_Typ"), "<br>",
+      "Roll: ", get_column("Roll_No_Txt"), "<br>",
+      "Units: ", get_column("Dwelling_Units")
+    ),
+    hover_options = list(
+      fill_extrusion_color = "#ffffff"
+    )
+  )
+```
+
+## Summary Statistics
+
+```{r}
+#| label: summary-stats
+
+parcels_all <- read_parquet(input_file) |> as.data.frame()
+
+summary_table <- parcels_all |>
+  group_by(Muni_Name_With_Typ) |>
+  summarise(
+    count = n(),
+    median_value = median(Total_Value_Num, na.rm = TRUE),
+    mean_value = mean(Total_Value_Num, na.rm = TRUE),
+    max_value = if (all(is.na(Total_Value_Num))) NA_real_
+                else max(Total_Value_Num, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  arrange(desc(count)) |>
+  mutate(
+    median_value = dollar(median_value, prefix = "$", na.rm = FALSE),
+    mean_value = dollar(mean_value, prefix = "$", na.rm = FALSE),
+    max_value = dollar(max_value, prefix = "$", na.rm = FALSE)
+  )
+
+summary_table |> head(20) |> knitr::kable(
+  col.names = c("Municipality", "Count", "Median Value", "Mean Value", "Max Value"),
+  align = c("l", "r", "r", "r", "r")
+)
+```
