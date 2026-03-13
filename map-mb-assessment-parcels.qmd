@@ -48,7 +48,7 @@ pmtiles_file <- "data/mb-assessment-parcels.pmtiles"
 use_local_data <- FALSE
 
 # PMTiles URL for the deployed map (GitHub Releases — supports HTTP range requests)
-pmtiles_url <- "https://github.com/jayschellenberg/MBOpenData/releases/download/v1/mb-assessment-parcels.pmtiles"
+pmtiles_url <- "mb-assessment-parcels.pmtiles"  # Relative path — served from docs/ alongside index.html
 
 # Assessment roll metadata
 base_value_date <- "April 1, 2023"
