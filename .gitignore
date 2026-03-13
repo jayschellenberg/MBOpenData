@@ -17,7 +17,7 @@ _freeze/
 # R artifacts
 .Rhistory
 .RData
-.RDataTmp
+.RDataTmp*
 .Rproj.user/
 
 # Claude Code config
@@ -25,7 +25,11 @@ _freeze/
 
 # Quarto render intermediates
 *_files/
+!docs/**
 
 # OS files
 Thumbs.db
 .DS_Store
+
+/.quarto/
+**/*.quarto_ipynb

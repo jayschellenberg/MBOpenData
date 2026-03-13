@@ -1,30 +1,29 @@
 ---
 title: "Manitoba Assessment Parcels — 3D Value Map"
-subtitle: "437,000 parcels visualized with freestiler + mapgl"
-author: "MBOpenData"
+author: "Jay Schellenberg"
 date: today
+date-format: "MMMM D, YYYY"
 format:
   html:
     toc: true
-    code-fold: true
-    code-summary: "Show code"
+output-file: index.html
 execute:
-  echo: true
-  warning: true
-  message: true
+  echo: false
+  warning: false
+  message: false
 ---
 
 ## Overview
 
-Interactive 3D map of Manitoba's ~437,000 property assessment parcels.
+Interactive 3D map of Manitoba's property assessment parcels.
 **Height** encodes total assessed value; **color** encodes municipality.
-
-Pipeline: GeoParquet (from download script) → PMTiles (via freestiler) → 3D map (via mapgl).
-
-## Setup
+Use the **search bar** (top left) to find any address in Manitoba.
+Hover over a parcel to see its assessed value, roll number, and how it compares to the municipality median.
+Use the **layer toggle** (bottom left) to switch to a municipality-level view comparing total assessed value across municipalities.
 
 ```{r}
 #| label: setup
+#| include: false
 
 library(duckdb)
 library(DBI)
@@ -44,14 +43,20 @@ library(stringr)
 layer_name <- "mb-parcels"
 pmtiles_file <- "data/mb-assessment-parcels.pmtiles"
 
+# Set to TRUE to use local data embedded in the HTML (works offline, larger file).
+# Set to FALSE to use PMTiles from GitHub Releases (smaller file, requires upload).
+use_local_data <- FALSE
+
 # PMTiles URL for the deployed map (GitHub Releases — supports HTTP range requests)
 pmtiles_url <- "https://github.com/jayschellenberg/MBOpenData/releases/download/v1/mb-assessment-parcels.pmtiles"
-```
 
-## Find Data
+# Assessment roll metadata
+base_value_date <- "April 1, 2023"
+```
 
 ```{r}
 #| label: find-data
+#| include: false
 
 parquet_files <- fs::dir_ls("data", glob = "*/mb-assessment-parcels-*.parquet")
 
@@ -62,15 +67,109 @@ if (length(parquet_files) == 0) {
 input_file <- sort(parquet_files, decreasing = TRUE)[1]
 file_date <- stringr::str_extract(basename(input_file), "\\d{4}-\\d{2}-\\d{2}")
 
+# Extract assessment year from the Asmt_Roll field (e.g. "2026 Tax Assessment Roll")
+asmt_year <- read_parquet(input_file, col_select = "Asmt_Roll") |>
+  pull(Asmt_Roll) |>
+  na.omit() |>
+  head(1) |>
+  stringr::str_extract("\\d{4}")
+
 cli_alert_success("Using: {basename(input_file)}")
 cli_alert_info("Download date: {file_date}")
 cli_alert_info("File size: {fs::file_size(input_file)}")
 ```
 
-## Generate PMTiles
+## Provincial Overview — `r asmt_year` Assessment Roll (Base Value Date: `r base_value_date`)
+
+```{r}
+#| label: provincial-overview
+#| include: false
+
+parcels_all <- read_parquet(input_file) |> as.data.frame()
+
+n_parcels <- nrow(parcels_all)
+n_munis <- n_distinct(parcels_all$Muni_Name_With_Typ)
+total_assessed <- sum(parcels_all$Total_Value_Num, na.rm = TRUE)
+median_assessed <- median(parcels_all$Total_Value_Num, na.rm = TRUE)
+
+# Top municipality by total assessed value
+top_muni <- parcels_all |>
+  group_by(Muni_Name_With_Typ) |>
+  summarise(total = sum(Total_Value_Num, na.rm = TRUE), .groups = "drop") |>
+  slice_max(total, n = 1)
+```
+
+Manitoba's provincial assessment roll covers **`r format(n_parcels, big.mark = ",")`** property parcels across **`r n_munis`** municipalities, with a combined assessed value of **`r dollar(total_assessed, accuracy = 1, scale = 1e-9, suffix = "B")`**. The median property assessment is **`r dollar(median_assessed, accuracy = 1)`**. The largest municipality by total assessed value is **`r top_muni$Muni_Name_With_Typ`** at `r dollar(top_muni$total, accuracy = 1, scale = 1e-9, suffix = "B")`.
+
+*Note: This dataset covers Manitoba outside Winnipeg. Winnipeg maintains a [separate assessment roll](https://data.winnipeg.ca/Assessment-Taxation-Corporate/Assessment-Parcels/d4mq-wa44).*
+
+Data source: [Manitoba Assessment Parcels](https://geoportal.gov.mb.ca/datasets/8106acf39b124422a5f03a5c4e55d269_0/explore) via the Manitoba GeoPortal (downloaded `r file_date`).
+
+```{r}
+#| label: load-map-data
+#| include: false
+
+cli_alert_info("Loading parcel geometry from {basename(input_file)}...")
+
+parcels_sf <- read_parquet(input_file) |>
+  mutate(geometry = st_as_sfc(geometry)) |>
+  st_as_sf()
+
+# Simplify geometry for faster rendering and smaller HTML output
+# dTolerance = 0.0002 (~22m) keeps parcels recognizable at street zoom
+if (use_local_data) {
+  sf_use_s2(FALSE)
+  parcels_sf <- st_make_valid(parcels_sf) |>
+    st_simplify(dTolerance = 0.0002, preserveTopology = TRUE)
+  sf_use_s2(TRUE)
+  cli_alert_info("Simplified geometry for local embedding")
+}
+
+# Compute municipality medians and join back for tooltip context
+muni_medians <- parcels_sf |>
+  st_drop_geometry() |>
+  group_by(Muni_Name_With_Typ) |>
+  summarise(Muni_Median = median(Total_Value_Num, na.rm = TRUE), .groups = "drop")
+
+parcels_sf <- parcels_sf |>
+  left_join(muni_medians, by = "Muni_Name_With_Typ") |>
+  mutate(Muni_Median_Fmt = if_else(
+    is.na(Muni_Median), "N/A", dollar(Muni_Median, accuracy = 1)
+  )) |>
+  select(Roll_No_Txt, Total_Value, Total_Value_Num,
+         Muni_Median, Muni_Median_Fmt,
+         Property_Address, Municipality, Muni_Name_With_Typ,
+         Dwelling_Units)
+
+cli_alert_success("Loaded {format(nrow(parcels_sf), big.mark = ',')} parcels")
+
+# Dissolve parcels into municipality boundaries for choropleth layer
+cli_alert_info("Dissolving parcels by municipality...")
+sf_use_s2(FALSE)
+muni_sf <- parcels_sf |>
+  group_by(Muni_Name_With_Typ) |>
+  summarise(
+    Total_Assessed = sum(Total_Value_Num, na.rm = TRUE),
+    Parcel_Count = n(),
+    Median_Value = median(Total_Value_Num, na.rm = TRUE),
+    .groups = "drop"
+  ) |>
+  st_make_valid() |>
+  st_simplify(dTolerance = 0.001, preserveTopology = TRUE) |>
+  st_make_valid() |>
+  mutate(
+    Total_Assessed_Fmt = dollar(Total_Assessed, accuracy = 1),
+    Median_Value_Fmt = dollar(Median_Value, accuracy = 1),
+    Value_Rank = paste(rank(-Total_Assessed, ties.method = "min"), "of", n())
+  )
+sf_use_s2(TRUE)
+cli_alert_success("Created {nrow(muni_sf)} municipality polygons")
+```
 
 ```{r}
 #| label: generate-pmtiles
+#| include: false
+#| eval: !expr '!use_local_data'
 
 # Skip if PMTiles is newer than source parquet
 needs_rebuild <- !fs::file_exists(pmtiles_file) ||
@@ -79,15 +178,6 @@ needs_rebuild <- !fs::file_exists(pmtiles_file) ||
 
 if (needs_rebuild) {
   cli_alert_info("Generating PMTiles from {basename(input_file)}...")
-
-  # Use freestile() with sf object (not freestile_query) because
-  # DuckDB doesn't recognize geoarrow geometry as spatial type
-  parcels_sf <- read_parquet(input_file) |>
-    mutate(geometry = st_as_sfc(geometry)) |>
-    st_as_sf() |>
-    select(OBJECTID, Roll_No_Txt, Total_Value, Total_Value_Num,
-           Property_Address, Municipality, Muni_Name_With_Typ,
-           Dwelling_Units)
 
   freestile(
     input = parcels_sf,
@@ -103,13 +193,11 @@ if (needs_rebuild) {
 }
 ```
 
-## Explore Municipalities
-
 ```{r}
 #| label: municipality-codes
+#| include: false
 
-parcels_df <- read_parquet(input_file) |>
-  as.data.frame() |>
+parcels_df <- parcels_all |>
   count(Muni_Name_With_Typ, sort = TRUE)
 
 cli_alert_info("Found {nrow(parcels_df)} municipalities")
@@ -118,6 +206,7 @@ parcels_df |> head(20) |> knitr::kable()
 
 ```{r}
 #| label: define-palette
+#| include: false
 
 # Define a categorical color palette for the top municipalities
 # Colors chosen for visual distinction on a dark basemap
@@ -146,7 +235,11 @@ muni_colors <- rep_len(palette, length(muni_names))
 ```{r}
 #| label: map-3d
 
-maplibre(
+# Quantile breaks for municipality choropleth color scale
+total_vals <- muni_sf$Total_Assessed[!is.na(muni_sf$Total_Assessed)]
+q_breaks <- as.numeric(quantile(total_vals, probs = c(0, 0.2, 0.4, 0.6, 0.8, 1.0)))
+
+m <- maplibre(
   style = carto_style("dark-matter"),
   center = c(-98.0, 55.0),
   zoom = 5,
@@ -154,65 +247,207 @@ maplibre(
   bearing = 0,
   projection = "mercator"
 ) |>
-  add_pmtiles_source(
-    id = "mb-parcels-source",
-    url = pmtiles_url
-  ) |>
-  add_fill_extrusion_layer(
-    id = "mb-parcels-3d",
-    source = "mb-parcels-source",
-    source_layer = layer_name,
-    fill_extrusion_height = interpolate(
-      column = "Total_Value_Num",
-      values = c(0, 100000, 500000, 2000000, 10000000),
-      stops = c(0, 50, 200, 600, 2000)
+  add_navigation_control(position = "top-right") |>
+  add_geocoder_control(
+    position = "top-left",
+    placeholder = "Search for an address..."
+  )
+
+# Municipality choropleth layer (hidden by default)
+m <- m |>
+  add_fill_layer(
+    id = "muni-total-value",
+    source = muni_sf,
+    fill_color = interpolate(
+      column = "Total_Assessed",
+      values = q_breaks,
+      stops = c("#2166ac", "#67a9cf", "#d1e5f0", "#fddbc7", "#ef8a62", "#b2182b")
     ),
-    fill_extrusion_color = match_expr(
-      column = "Muni_Name_With_Typ",
-      values = muni_names,
-      stops = muni_colors,
-      default = "#95a5a6"
-    ),
-    fill_extrusion_opacity = 0.8,
+    fill_opacity = 0.8,
+    visibility = "none",
     tooltip = concat(
-      "<strong>", get_column("Property_Address"), "</strong><br>",
-      "Value: ", get_column("Total_Value"), "<br>",
-      "Municipality: ", get_column("Muni_Name_With_Typ"), "<br>",
-      "Roll: ", get_column("Roll_No_Txt"), "<br>",
-      "Units: ", get_column("Dwelling_Units")
+      "<strong>", get_column("Muni_Name_With_Typ"), "</strong><br>",
+      "Total Assessed Value: ", get_column("Total_Assessed_Fmt"), "<br>",
+      "Rank: ", get_column("Value_Rank"), "<br>",
+      "Parcels: ", get_column("Parcel_Count"), "<br>",
+      "Median Value: ", get_column("Median_Value_Fmt")
     ),
     hover_options = list(
-      fill_extrusion_color = "#ffffff"
+      fill_color = "#ffffff",
+      fill_opacity = 1
     )
   )
+
+# 3D parcel extrusion layer (visible by default)
+if (use_local_data) {
+  m <- m |>
+    add_fill_extrusion_layer(
+      id = "mb-parcels-3d",
+      source = parcels_sf,
+      fill_extrusion_height = interpolate(
+        column = "Total_Value_Num",
+        values = c(0, 100000, 500000, 2000000, 10000000),
+        stops = c(0, 50, 200, 600, 2000)
+      ),
+      fill_extrusion_color = match_expr(
+        column = "Muni_Name_With_Typ",
+        values = muni_names,
+        stops = muni_colors,
+        default = "#95a5a6"
+      ),
+      fill_extrusion_opacity = 0.8,
+      tooltip = concat(
+        "<strong>", get_column("Property_Address"), "</strong><br>",
+        "Assessed Value: ", get_column("Total_Value"), "<br>",
+        "Municipality Median: ", get_column("Muni_Median_Fmt"), "<br>",
+        "Municipality: ", get_column("Muni_Name_With_Typ"), "<br>",
+        "Roll No: ", get_column("Roll_No_Txt"), "<br>",
+        "Dwelling Units: ", get_column("Dwelling_Units")
+      ),
+      hover_options = list(
+        fill_extrusion_color = "#ffffff"
+      )
+    )
+} else {
+  m <- m |>
+    add_pmtiles_source(
+      id = "mb-parcels-source",
+      url = pmtiles_url
+    ) |>
+    add_fill_extrusion_layer(
+      id = "mb-parcels-3d",
+      source = "mb-parcels-source",
+      source_layer = layer_name,
+      fill_extrusion_height = interpolate(
+        column = "Total_Value_Num",
+        values = c(0, 100000, 500000, 2000000, 10000000),
+        stops = c(0, 50, 200, 600, 2000)
+      ),
+      fill_extrusion_color = match_expr(
+        column = "Muni_Name_With_Typ",
+        values = muni_names,
+        stops = muni_colors,
+        default = "#95a5a6"
+      ),
+      fill_extrusion_opacity = 0.8,
+      tooltip = concat(
+        "<strong>", get_column("Property_Address"), "</strong><br>",
+        "Assessed Value: ", get_column("Total_Value"), "<br>",
+        "Municipality Median: ", get_column("Muni_Median_Fmt"), "<br>",
+        "Municipality: ", get_column("Muni_Name_With_Typ"), "<br>",
+        "Roll No: ", get_column("Roll_No_Txt"), "<br>",
+        "Dwelling Units: ", get_column("Dwelling_Units")
+      ),
+      hover_options = list(
+        fill_extrusion_color = "#ffffff"
+      )
+    )
+}
+
+# Build legend with abbreviated breakpoint labels (e.g. $1.2B, $450M)
+legend_colors <- c("#2166ac", "#67a9cf", "#d1e5f0", "#fddbc7", "#ef8a62", "#b2182b")
+fmt_short <- function(x) {
+  dplyr::case_when(
+    x >= 1e9  ~ paste0("$", trimws(format(round(x / 1e9, 1), nsmall = 1)), "B"),
+    x >= 1e6  ~ paste0("$", trimws(format(round(x / 1e6, 0))), "M"),
+    x >= 1e3  ~ paste0("$", trimws(format(round(x / 1e3, 0))), "K"),
+    TRUE      ~ paste0("$", trimws(format(round(x, 0))))
+  )
+}
+legend_labels <- fmt_short(q_breaks)
+
+legend_rows <- paste0(sapply(seq_along(legend_colors), function(i) {
+  label <- if (i == 1) {
+    paste0("&lt; ", legend_labels[i + 1])
+  } else if (i == length(legend_colors)) {
+    paste0("&ge; ", legend_labels[i])
+  } else {
+    paste0(legend_labels[i], " \u2013 ", legend_labels[i + 1])
+  }
+  paste0(
+    '<div style="display:flex;align-items:center;margin-bottom:3px;">',
+    '<span style="display:inline-block;width:18px;height:12px;background:', legend_colors[i],
+    ';border-radius:2px;margin-right:6px;flex-shrink:0;"></span>',
+    '<span>', label, '</span></div>'
+  )
+}), collapse = "")
+
+# Combine layer toggle + legend into ONE add_control (mapgl only keeps one custom control)
+combined_control_html <- paste0(
+  '<div style="background:rgba(0,0,0,0.75);padding:10px 12px;border-radius:6px;color:#fff;font-family:sans-serif;font-size:13px;line-height:1.6;">',
+  '<div style="font-weight:bold;margin-bottom:4px;">View</div>',
+  '<label style="display:block;cursor:pointer;">',
+  '<input type="radio" name="map-layer" value="3d" checked style="margin-right:5px;">3D Parcels',
+  '</label>',
+  '<label style="display:block;cursor:pointer;">',
+  '<input type="radio" name="map-layer" value="muni" style="margin-right:5px;">Total Value by Municipality',
+  '</label>',
+  '<div id="muni-legend" style="display:none;margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.3);font-size:12px;line-height:1.5;">',
+  '<div style="font-weight:bold;margin-bottom:5px;">Total Assessed Value</div>',
+  legend_rows,
+  '</div>',
+  '</div>'
+)
+
+m <- m |>
+  add_control(combined_control_html, position = "bottom-left") |>
+  htmlwidgets::onRender("
+    function(el, x) {
+      var poll = setInterval(function() {
+        if (!el.map || !el.map.isStyleLoaded()) return;
+        clearInterval(poll);
+        var map = el.map;
+        var legend = document.getElementById('muni-legend');
+        var radios = el.querySelectorAll('input[name=\"map-layer\"]');
+        radios.forEach(function(radio) {
+          radio.addEventListener('change', function() {
+            if (this.value === '3d') {
+              map.setLayoutProperty('mb-parcels-3d', 'visibility', 'visible');
+              map.setLayoutProperty('muni-total-value', 'visibility', 'none');
+              if (legend) legend.style.display = 'none';
+            } else {
+              map.setLayoutProperty('mb-parcels-3d', 'visibility', 'none');
+              map.setLayoutProperty('muni-total-value', 'visibility', 'visible');
+              if (legend) legend.style.display = 'block';
+            }
+          });
+        });
+      }, 200);
+    }
+  ")
+
+m
 ```
 
-## Summary Statistics
+## Assessed Value by Municipality — `r asmt_year` Assessment Roll (Base Value Date: `r base_value_date`)
 
 ```{r}
 #| label: summary-stats
-
-parcels_all <- read_parquet(input_file) |> as.data.frame()
 
 summary_table <- parcels_all |>
   group_by(Muni_Name_With_Typ) |>
   summarise(
     count = n(),
+    total_value = sum(Total_Value_Num, na.rm = TRUE),
     median_value = median(Total_Value_Num, na.rm = TRUE),
     mean_value = mean(Total_Value_Num, na.rm = TRUE),
     max_value = if (all(is.na(Total_Value_Num))) NA_real_
                 else max(Total_Value_Num, na.rm = TRUE),
     .groups = "drop"
   ) |>
-  arrange(desc(count)) |>
+  arrange(desc(total_value))
+
+summary_display <- summary_table |>
   mutate(
-    median_value = dollar(median_value, prefix = "$", na.rm = FALSE),
-    mean_value = dollar(mean_value, prefix = "$", na.rm = FALSE),
-    max_value = dollar(max_value, prefix = "$", na.rm = FALSE)
+    total_value = dollar(total_value, accuracy = 1),
+    median_value = dollar(median_value, accuracy = 1),
+    mean_value = dollar(mean_value, accuracy = 1),
+    max_value = dollar(max_value, accuracy = 1)
   )
 
-summary_table |> head(20) |> knitr::kable(
-  col.names = c("Municipality", "Count", "Median Value", "Mean Value", "Max Value"),
-  align = c("l", "r", "r", "r", "r")
+summary_display |> knitr::kable(
+  col.names = c("Municipality", "Parcels", "Total Assessed Value",
+                "Median", "Mean", "Max"),
+  align = c("l", "r", "r", "r", "r", "r")
 )
 ```
