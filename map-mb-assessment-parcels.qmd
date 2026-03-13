@@ -79,7 +79,7 @@ cli_alert_info("Download date: {file_date}")
 cli_alert_info("File size: {fs::file_size(input_file)}")
 ```
 
-## Provincial Overview — `r asmt_year` Assessment Roll (Base Value Date: `r base_value_date`)
+## Provincial Overview
 
 ```{r}
 #| label: provincial-overview
@@ -99,7 +99,7 @@ top_muni <- parcels_all |>
   slice_max(total, n = 1)
 ```
 
-Manitoba's provincial assessment roll covers **`r format(n_parcels, big.mark = ",")`** property parcels across **`r n_munis`** municipalities, with a combined assessed value of **`r dollar(total_assessed, accuracy = 1, scale = 1e-9, suffix = "B")`**. The median property assessment is **`r dollar(median_assessed, accuracy = 1)`**. The largest municipality by total assessed value is **`r top_muni$Muni_Name_With_Typ`** at `r dollar(top_muni$total, accuracy = 1, scale = 1e-9, suffix = "B")`.
+Manitoba's provincial assessment roll covers **`r format(n_parcels, big.mark = ",")`** property parcels across **`r n_munis`** municipalities, with a combined assessed value of **`r dollar(total_assessed, accuracy = 1, scale = 1e-9, suffix = "B")`** (`r asmt_year` Assessment Roll, base value date `r base_value_date`). The median property assessment is **`r dollar(median_assessed, accuracy = 1)`**. The largest municipality by total assessed value is **`r top_muni$Muni_Name_With_Typ`** at `r dollar(top_muni$total, accuracy = 1, scale = 1e-9, suffix = "B")`.
 
 *Note: This dataset covers Manitoba outside Winnipeg. Winnipeg maintains a [separate assessment roll](https://data.winnipeg.ca/Assessment-Taxation-Corporate/Assessment-Parcels/d4mq-wa44).*
 
@@ -241,7 +241,7 @@ total_vals <- muni_sf$Total_Assessed[!is.na(muni_sf$Total_Assessed)]
 q_breaks <- as.numeric(quantile(total_vals, probs = c(0, 0.2, 0.4, 0.6, 0.8, 1.0)))
 
 m <- maplibre(
-  style = carto_style("dark-matter"),
+  style = carto_style("positron"),
   center = c(-98.0, 55.0),
   zoom = 5,
   pitch = 30,
@@ -375,7 +375,7 @@ legend_rows <- paste0(sapply(seq_along(legend_colors), function(i) {
 
 # Combine layer toggle + legend into ONE add_control (mapgl only keeps one custom control)
 combined_control_html <- paste0(
-  '<div style="background:rgba(0,0,0,0.75);padding:10px 12px;border-radius:6px;color:#fff;font-family:sans-serif;font-size:13px;line-height:1.6;">',
+  '<div style="background:rgba(255,255,255,0.9);padding:10px 12px;border-radius:6px;color:#333;font-family:sans-serif;font-size:13px;line-height:1.6;box-shadow:0 1px 4px rgba(0,0,0,0.15);">',
   '<div style="font-weight:bold;margin-bottom:4px;">View</div>',
   '<label style="display:block;cursor:pointer;">',
   '<input type="radio" name="map-layer" value="3d" checked style="margin-right:5px;">3D Parcels',
@@ -383,7 +383,7 @@ combined_control_html <- paste0(
   '<label style="display:block;cursor:pointer;">',
   '<input type="radio" name="map-layer" value="muni" style="margin-right:5px;">Total Value by Municipality',
   '</label>',
-  '<div id="muni-legend" style="display:none;margin-top:8px;padding-top:8px;border-top:1px solid rgba(255,255,255,0.3);font-size:12px;line-height:1.5;">',
+  '<div id="muni-legend" style="display:none;margin-top:8px;padding-top:8px;border-top:1px solid rgba(0,0,0,0.15);font-size:12px;line-height:1.5;">',
   '<div style="font-weight:bold;margin-bottom:5px;">Total Assessed Value</div>',
   legend_rows,
   '</div>',
@@ -420,7 +420,7 @@ m <- m |>
 m
 ```
 
-## Assessed Value by Municipality — `r asmt_year` Assessment Roll (Base Value Date: `r base_value_date`)
+## Assessed Value by Municipality — `r asmt_year` Assessment Roll
 
 ```{r}
 #| label: summary-stats
