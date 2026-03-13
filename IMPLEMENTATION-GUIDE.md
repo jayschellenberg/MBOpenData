@@ -26,7 +26,7 @@ Data Source (ArcGIS REST API / Socrata / CSV)
 | Data format | GeoParquet (`.parquet`) | Fast columnar reads, compact, preserves geometry |
 | Geometry library | `sf` with `geoarrow` bridge | `read_parquet()` returns geoarrow; convert with `st_as_sfc(geometry)` then `st_as_sf()` |
 | Map renderer | `mapgl` (R bindings for MapLibre GL JS) | 3D extrusions, smooth interactivity, no Mapbox token needed |
-| Deployment mode | `use_local_data <- TRUE` embeds GeoJSON (~234MB HTML); `FALSE` uses PMTiles URL (~4MB) | Local works offline for testing; PMTiles for production deployment |
+| Deployment mode | `use_local_data <- TRUE` embeds GeoJSON (~265MB HTML) | Self-contained, works on any static host including GitHub Pages |
 | Output | Quarto → `docs/index.html` via `_quarto.yml` `output-dir: docs` | Direct GitHub Pages deployment from `docs/` |
 
 ---
@@ -36,12 +36,17 @@ Data Source (ArcGIS REST API / Socrata / CSV)
 ```
 project-root/
 ├── _quarto.yml              # output-dir: docs
+├── .gitattributes           # (optional) Git LFS tracking for large files
 ├── DownloadScript.qmd       # Data download (eval: false)
 ├── map-visualization.qmd    # Map + analysis (the main deliverable)
 ├── README.md
 ├── .gitignore               # data/, *_files/, but !docs/**
-└── data/
-    └── {dataset}-{YYYY-MM-DD}.parquet
+├── data/
+│   └── {dataset}-{YYYY-MM-DD}.parquet
+└── docs/
+    ├── index.html                        # Rendered map (~17 MB)
+    ├── {dataset}.pmtiles                 # Vector tiles (Git LFS)
+    └── map-visualization_files/libs/     # Quarto JS/CSS dependencies
 ```
 
 ### `_quarto.yml`
@@ -61,6 +66,10 @@ data/
 ```
 
 The `!docs/**` exception ensures rendered output is tracked for GitHub Pages even though `*_files/` is ignored.
+
+### `.gitattributes` — Git LFS (optional)
+
+Git LFS can be used for large files in the repo (e.g. PMTiles source files in `data/`). Note that **GitHub Pages does not serve LFS-tracked files** — any file in `docs/` that needs to be served must be stored directly in git (not LFS). When using `use_local_data = TRUE`, the PMTiles file in `docs/` is not needed since data is embedded in the HTML.
 
 ---
 
@@ -268,6 +277,8 @@ area_sf <- parcels_sf |>
     .groups = "drop"
   ) |>
   st_make_valid() |>
+  st_simplify(dTolerance = 0.001, preserveTopology = TRUE) |>
+  st_make_valid() |>
   mutate(
     Total_Assessed_Fmt = dollar(Total_Assessed, accuracy = 1),
     Median_Value_Fmt   = dollar(Median_Value, accuracy = 1),
@@ -275,6 +286,8 @@ area_sf <- parcels_sf |>
   )
 sf_use_s2(TRUE)
 ```
+
+**Always simplify dissolved polygons.** The dissolve inherits full-resolution parcel boundaries. Without simplification, 186 municipality polygons ballooned the HTML from 17 MB to 71 MB. `dTolerance = 0.001` (~110m) is fine for area outlines viewed at lower zoom — they don't need parcel-level precision.
 
 For Winnipeg, the grouping column would be neighbourhood or ward instead of `Muni_Name_With_Typ`.
 
@@ -504,14 +517,24 @@ Inline R (`` `r var` ``) in markdown text evaluates in document order. Variables
 
 ### 5. File size trade-offs
 
-| Mode | HTML size | Requirements |
-|---|---|---|
-| `use_local_data = TRUE` | ~234–284 MB | None (works offline) |
-| `use_local_data = FALSE` | ~4 MB | PMTiles uploaded to GitHub Releases |
+| Mode | HTML size | PMTiles | Total to host | Requirements |
+|---|---|---|---|---|
+| `use_local_data = TRUE` | ~265 MB | None | ~265 MB | None (works on any static host) |
+| `use_local_data = FALSE` | ~17 MB | ~212 MB | ~229 MB | PMTiles on a host with HTTP Range Requests + CORS |
 
-For development and testing, use local. For production deployment, upload PMTiles to a GitHub Release (supports HTTP range requests) and switch to `FALSE`.
+Use `TRUE` for GitHub Pages deployment — it is self-contained and works without any external tile hosting. Use `FALSE` only if you have a tile-hosting service (e.g. Cloudflare R2, S3) that supports HTTP Range Requests and CORS headers.
 
-### 6. Winnipeg vs. Manitoba differences to expect
+### 6. PMTiles hosting pitfalls on GitHub
+
+**GitHub Releases:** Redirects to Azure Blob Storage which does not return `Access-Control-Allow-Origin` headers. The browser silently blocks PMTiles range requests, and the 3D parcel layer shows nothing.
+
+**GitHub Pages + Git LFS:** GitHub Pages does **not** serve Git LFS-tracked files. Requests for LFS-tracked files return a 404. This makes the `docs/` + LFS approach non-functional for PMTiles.
+
+**The fix:** Use `use_local_data <- TRUE` to embed GeoJSON directly in the HTML. This produces a larger file (~265 MB) but is fully self-contained and works on any static host, including GitHub Pages, with no CORS or LFS issues. The browser loads all parcel data on page load rather than streaming tiles on demand.
+
+If PMTiles streaming is required (e.g. for very large datasets), host the `.pmtiles` file on a service that supports HTTP Range Requests and CORS, such as Cloudflare R2, AWS S3, or a dedicated tile server.
+
+### 7. Winnipeg vs. Manitoba differences to expect
 
 | Aspect | Manitoba (current) | Winnipeg (to adapt) |
 |---|---|---|
@@ -528,7 +551,9 @@ For development and testing, use local. For production deployment, upload PMTile
 
 ---
 
-## Rendering
+## Rendering and Deployment
+
+### Render
 
 ```bash
 # Path to Quarto (bundled with RStudio on Windows)
@@ -539,6 +564,38 @@ quarto render map-visualization.qmd
 ```
 
 Output goes to `docs/index.html` per `_quarto.yml`.
+
+### Deploy to GitHub Pages
+
+Full workflow from render to live site:
+
+```bash
+# 1. Render with PMTiles mode
+#    (set use_local_data <- FALSE in the QMD first)
+quarto render map-visualization.qmd
+
+# 2. Copy PMTiles to docs/ (if regenerated)
+cp data/my-dataset.pmtiles docs/my-dataset.pmtiles
+
+# 3. Stage, commit, push
+git add docs/ .gitattributes map-visualization.qmd
+git commit -m "Update map"
+git push origin main
+```
+
+Then enable GitHub Pages in repo Settings → Pages → Source: `main` branch, `/docs` folder.
+
+### Updating the data
+
+When you re-download the source data:
+
+1. Run the download script to get a new date-stamped parquet
+2. Set `use_local_data <- TRUE` temporarily for testing (optional)
+3. Render and verify the map locally
+4. Switch back to `use_local_data <- FALSE`
+5. Re-render (this regenerates PMTiles if the parquet is newer)
+6. Copy the new PMTiles to `docs/`
+7. Commit and push
 
 ---
 

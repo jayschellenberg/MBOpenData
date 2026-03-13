@@ -1,6 +1,6 @@
 ---
 title: "Manitoba Assessment Parcels — 3D Value Map"
-author: "Jay Schellenberg"
+author: "Jason M. Schellenberg, P. App, AACI"
 date: today
 date-format: "MMMM D, YYYY"
 format:
@@ -45,7 +45,7 @@ pmtiles_file <- "data/mb-assessment-parcels.pmtiles"
 
 # Set to TRUE to use local data embedded in the HTML (works offline, larger file).
 # Set to FALSE to use PMTiles from GitHub Releases (smaller file, requires upload).
-use_local_data <- FALSE
+use_local_data <- TRUE
 
 # PMTiles URL for the deployed map (GitHub Releases — supports HTTP range requests)
 pmtiles_url <- "mb-assessment-parcels.pmtiles"  # Relative path — served from docs/ alongside index.html
@@ -116,11 +116,12 @@ parcels_sf <- read_parquet(input_file) |>
   st_as_sf()
 
 # Simplify geometry for faster rendering and smaller HTML output
-# dTolerance = 0.0002 (~22m) keeps parcels recognizable at street zoom
+# Simplify geometry for embedded HTML to reduce file size
+# dTolerance = 0.0005 (~55m) keeps parcels recognizable while reducing vertex count
 if (use_local_data) {
   sf_use_s2(FALSE)
   parcels_sf <- st_make_valid(parcels_sf) |>
-    st_simplify(dTolerance = 0.0002, preserveTopology = TRUE)
+    st_simplify(dTolerance = 0.0005, preserveTopology = TRUE)
   sf_use_s2(TRUE)
   cli_alert_info("Simplified geometry for local embedding")
 }
@@ -137,8 +138,8 @@ parcels_sf <- parcels_sf |>
     is.na(Muni_Median), "N/A", dollar(Muni_Median, accuracy = 1)
   )) |>
   select(Roll_No_Txt, Total_Value, Total_Value_Num,
-         Muni_Median, Muni_Median_Fmt,
-         Property_Address, Municipality, Muni_Name_With_Typ,
+         Muni_Median_Fmt,
+         Property_Address, Muni_Name_With_Typ,
          Dwelling_Units)
 
 cli_alert_success("Loaded {format(nrow(parcels_sf), big.mark = ',')} parcels")
@@ -230,7 +231,7 @@ muni_names <- parcels_df$Muni_Name_With_Typ
 muni_colors <- rep_len(palette, length(muni_names))
 ```
 
-## 3D Map
+## Interactive Map of Municipalities & Parcels
 
 ```{r}
 #| label: map-3d
@@ -445,9 +446,11 @@ summary_display <- summary_table |>
     max_value = dollar(max_value, accuracy = 1)
   )
 
-summary_display |> knitr::kable(
-  col.names = c("Municipality", "Parcels", "Total Assessed Value",
-                "Median", "Mean", "Max"),
-  align = c("l", "r", "r", "r", "r", "r")
+DT::datatable(
+  summary_display,
+  colnames = c("Municipality", "Parcels", "Total Assessed Value",
+               "Median", "Mean", "Max"),
+  options = list(pageLength = 25, order = list(list(2, "desc"))),
+  rownames = FALSE
 )
 ```
